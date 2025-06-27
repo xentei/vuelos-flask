@@ -1,9 +1,7 @@
 from flask import Flask, jsonify
 import datetime
 import logging
-
-# Asegurate de tener este archivo en el repo
-from tams_scraper import TAMSScraperFinal
+from tams_scraper import TAMSScraperFinal  # ✅ debe importar la clase, no otro servidor Flask
 
 app = Flask(__name__)
 
@@ -27,7 +25,7 @@ def vuelos():
 
     except Exception as e:
         logging.exception("Error en el scraping")
-        return jsonify({"error": str(e)}), 500
+        return jsonify({'error': str(e)}), 500
 
 if __name__ == '__main__':
     import os
