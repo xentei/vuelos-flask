@@ -1,5 +1,9 @@
 from flask import Flask, jsonify
 import datetime
+import logging
+
+# Asegurate de tener este archivo en el repo
+from tams_scraper import TAMSScraperFinal
 
 app = Flask(__name__)
 
@@ -9,23 +13,21 @@ def home():
 
 @app.route('/vuelos')
 def vuelos():
-    # Ejemplo fijo; en tu versión real reemplazás con scraping o lectura dinámica
-    data = {
-        "timestamp": datetime.datetime.now().isoformat(),
-        "arribos": [
-            {
-                "Vuelo": "7040",
-                "Tipo": "Arribo",
-                "Origen": "GIG",
-                "Destino": "AEP",
-                "Posicion": "05",
-                "STA": "2025-06-27T01:40:00",
-                "Cia": "G3",
-                "Matricula": "PSGRD"
-            }
-        ]
-    }
-    return jsonify(data)
+    try:
+        scraper = TAMSScraperFinal()
+        arribos, partidas = scraper.scrape_all_flights()
+
+        data = {
+            "timestamp": datetime.datetime.now().isoformat(),
+            "arribos": arribos,
+            "partidas": partidas
+        }
+
+        return jsonify(data)
+
+    except Exception as e:
+        logging.exception("Error en el scraping")
+        return jsonify({"error": str(e)}), 500
 
 if __name__ == '__main__':
     import os
