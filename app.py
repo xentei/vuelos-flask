@@ -1,29 +1,29 @@
 from flask import Flask, jsonify
+from scraper import TAMSScraperFinal
 import logging
-from scraper import TAMSScraperFinal  # asegúrate de que el archivo se llame scraper.py
-
-# Configurar logging
-logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(levelname)s - %(message)s')
+import datetime
 
 app = Flask(__name__)
+logging.basicConfig(level=logging.INFO)
 
 @app.route('/')
-def home():
-    return 'API de vuelos funcionando. Usá /vuelos para obtener datos.'
-
-@app.route('/vuelos')
-def vuelos():
+def obtener_vuelos():
     try:
         scraper = TAMSScraperFinal()
-        arribos, partidas = scraper.scrape_all_flights()
-        return jsonify({
-            'arribos': arribos,
-            'partidas': partidas
-        })
-    except Exception as e:
-        logging.exception("Error en el scraping")
-        return jsonify({'error': str(e)}), 500
+        arrivals, departures = scraper.scrape_all_flights()
 
-if __name__ == '__main__':
-    logging.info("Servidor Flask iniciando en http://0.0.0.0:5000")
-    app.run(host='0.0.0.0', port=5000)
+        data = {
+            'arribos': arrivals,
+            'partidas': departures,
+            'timestamp': datetime.datetime.now().isoformat()
+        }
+
+        return jsonify(data), 200
+
+    except Exception as e:
+        logging.exception("Error al obtener vuelos")
+        return jsonify({"error": str(e)}), 500
+
+if __name__ == "__main__":
+    app.run(debug=False, host="0.0.0.0", port=5000)
+
