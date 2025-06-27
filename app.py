@@ -1,7 +1,9 @@
 from flask import Flask, jsonify
 import logging
+from scraper import TAMSScraperFinal  # asegúrate de que el archivo se llame scraper.py
 
-from scraper import TAMSScraperFinal  # nuevo nombre del archivo del scraper
+# Configurar logging
+logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(levelname)s - %(message)s')
 
 app = Flask(__name__)
 
@@ -23,4 +25,5 @@ def vuelos():
         return jsonify({'error': str(e)}), 500
 
 if __name__ == '__main__':
+    logging.info("Servidor Flask iniciando en http://0.0.0.0:5000")
     app.run(host='0.0.0.0', port=5000)
