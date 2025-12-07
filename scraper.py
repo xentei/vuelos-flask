@@ -75,7 +75,7 @@ class TAMSScraperFinal:
         response = self.session.post(self.base_url, data=data)
         soup = BeautifulSoup(response.text, 'html.parser')
         viewstate = self.extract_viewstate_data(soup)
-        time.sleep(1)
+        time.sleep(0.3)
         
         # Paso 2: Hacer clic en Buscar
         data = {
@@ -94,7 +94,7 @@ class TAMSScraperFinal:
         response = self.session.post(self.base_url, data=data)
         soup = BeautifulSoup(response.text, 'html.parser')
         viewstate = self.extract_viewstate_data(soup)
-        time.sleep(1)
+        time.sleep(0.3)
         
         return soup, viewstate
 
@@ -129,7 +129,7 @@ class TAMSScraperFinal:
         # Extraer nuevo ViewState INMEDIATAMENTE
         new_viewstate = self.extract_viewstate_data(soup)
         
-        time.sleep(1)
+        time.sleep(0.3)
         
         return soup, new_viewstate
 
