@@ -22,14 +22,23 @@ class TAMSScraperFinal:
         except:
             user_agent = 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36'
         
+        # Optimizar para velocidad
         self.session.headers.update({
             'User-Agent': user_agent,
             'Accept': 'text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8',
             'Accept-Language': 'es-ES,es;q=0.9',
-            'Accept-Encoding': 'gzip, deflate',
             'Connection': 'keep-alive',
-            'Upgrade-Insecure-Requests': '1',
         })
+        
+        # Configurar timeouts agresivos y keep-alive
+        adapter = requests.adapters.HTTPAdapter(
+            pool_connections=10,
+            pool_maxsize=20,
+            max_retries=1,
+            pool_block=False
+        )
+        self.session.mount('http://', adapter)
+        self.session.mount('https://', adapter)
 
     def extract_viewstate_data(self, soup: BeautifulSoup) -> Dict[str, str]:
         """Extrae los tres campos críticos de ASP.NET ViewState"""
@@ -47,7 +56,7 @@ class TAMSScraperFinal:
     def get_initial_page(self) -> Tuple[BeautifulSoup, Dict[str, str]]:
         """Obtiene la página inicial y extrae ViewState"""
         logger.info("Obteniendo página inicial...")
-        response = self.session.get(self.base_url)
+        response = self.session.get(self.base_url, timeout=10)
         response.raise_for_status()
         
         soup = BeautifulSoup(response.text, 'html.parser')
@@ -72,10 +81,10 @@ class TAMSScraperFinal:
             **viewstate
         }
         
-        response = self.session.post(self.base_url, data=data)
+        response = self.session.post(self.base_url, data=data, timeout=10)
         soup = BeautifulSoup(response.text, 'html.parser')
         viewstate = self.extract_viewstate_data(soup)
-        time.sleep(0.3)
+        time.sleep(0.1)
         
         # Paso 2: Hacer clic en Buscar
         data = {
@@ -94,7 +103,55 @@ class TAMSScraperFinal:
         response = self.session.post(self.base_url, data=data)
         soup = BeautifulSoup(response.text, 'html.parser')
         viewstate = self.extract_viewstate_data(soup)
-        time.sleep(0.3)
+        time.sleep(0.1)
+        
+        return soup, viewstate
+
+    def change_time_window_and_search(self, viewstate: Dict[str, str], 
+                                       flight_type: str, hours: str) -> Tuple[BeautifulSoup, Dict[str, str]]:
+        """
+        Cambia la ventana horaria y busca.
+        hours puede ser: '6', '-1', '-2', etc.
+        flight_type: 'A' para Arribos, 'D' para Partidas
+        """
+        logger.info(f"Cambiando ventana horaria a {hours} horas para tipo {flight_type}...")
+        
+        # Paso 1: Cambiar el dropdown de ventana horaria (esto dispara un postback)
+        data = {
+            '__EVENTTARGET': 'ddlVentanaH',
+            '__EVENTARGUMENT': '',
+            'ddlMovTp': flight_type,
+            'ddlAeropuerto': 'AEP',
+            'ddlSector': '-1',
+            'ddlAerolinea': '-1',
+            'ddlAterrizados': 'TODOS',
+            'ddlVentanaH': hours,
+            **viewstate
+        }
+        
+        response = self.session.post(self.base_url, data=data)
+        soup = BeautifulSoup(response.text, 'html.parser')
+        viewstate = self.extract_viewstate_data(soup)
+        time.sleep(0.1)
+        
+        # Paso 2: Hacer clic en Buscar para aplicar el cambio
+        data = {
+            '__EVENTTARGET': '',
+            '__EVENTARGUMENT': '',
+            'ddlMovTp': flight_type,
+            'ddlAeropuerto': 'AEP',
+            'ddlSector': '-1',
+            'ddlAerolinea': '-1',
+            'ddlAterrizados': 'TODOS',
+            'ddlVentanaH': hours,
+            'btnBuscar': 'Buscar',
+            **viewstate
+        }
+        
+        response = self.session.post(self.base_url, data=data)
+        soup = BeautifulSoup(response.text, 'html.parser')
+        viewstate = self.extract_viewstate_data(soup)
+        time.sleep(0.1)
         
         return soup, viewstate
 
@@ -121,15 +178,13 @@ class TAMSScraperFinal:
             **viewstate
         }
         
-        # NO incluir btnBuscar aquí - solo para búsquedas, no para paginación
-        
         response = self.session.post(self.base_url, data=data)
         soup = BeautifulSoup(response.text, 'html.parser')
         
         # Extraer nuevo ViewState INMEDIATAMENTE
         new_viewstate = self.extract_viewstate_data(soup)
         
-        time.sleep(0.3)
+        time.sleep(0.1)
         
         return soup, new_viewstate
 
@@ -259,27 +314,54 @@ class TAMSScraperFinal:
         return all_flights
 
     def scrape_all_flights(self) -> Tuple[List[Dict], List[Dict]]:
-        """Scrapea arribos y partidas"""
-        # Obtener página inicial (viene con Arribos por defecto)
+        """Scrapea arribos y partidas con ventana de +6 horas y -1 hora"""
+        # Obtener página inicial (viene con Arribos por defecto, +6 horas)
         soup, viewstate = self.get_initial_page()
         
-        # Scrapear ARRIBOS
-        arrivals = self.scrape_all_pages(soup, viewstate, 'Arribos', max_pages=3)
+        # Scrapear ARRIBOS (+6 horas)
+        arrivals_plus6 = self.scrape_all_pages(soup, viewstate, 'Arribos', max_pages=3)
         
-        # Cambiar a PARTIDAS
+        # Cambiar a PARTIDAS (+6 horas)
         soup, viewstate = self.change_to_departures(viewstate)
         
-        # Scrapear PARTIDAS
-        departures = self.scrape_all_pages(soup, viewstate, 'Partidas', max_pages=3)
+        # Scrapear PARTIDAS (+6 horas)
+        departures_plus6 = self.scrape_all_pages(soup, viewstate, 'Partidas', max_pages=3)
+        
+        # Ahora obtener datos de -1 hora
+        logger.info("\n" + "="*70)
+        logger.info("CAMBIANDO A VENTANA HORARIA: -1 HORA")
+        logger.info("="*70 + "\n")
+        
+        # Cambiar a ARRIBOS -1 hora (solo primera página)
+        soup, viewstate = self.change_time_window_and_search(viewstate, 'A', '-1')
+        logger.info("\nExtrayendo ARRIBOS (-1 hora) - Solo página 1")
+        arrivals_minus1 = self.parse_flights(soup, 'Arribos')
+        logger.info(f"✓ {len(arrivals_minus1)} arribos encontrados en -1 hora\n")
+        
+        # Cambiar a PARTIDAS -1 hora (solo primera página)
+        soup, viewstate = self.change_time_window_and_search(viewstate, 'D', '-1')
+        logger.info("Extrayendo PARTIDAS (-1 hora) - Solo página 1")
+        departures_minus1 = self.parse_flights(soup, 'Partidas')
+        logger.info(f"✓ {len(departures_minus1)} partidas encontradas en -1 hora\n")
+        
+        # Combinar todos los resultados
+        all_arrivals = arrivals_plus6 + arrivals_minus1
+        all_departures = departures_plus6 + departures_minus1
         
         logger.info("="*70)
         logger.info(f"RESUMEN FINAL")
-        logger.info(f"  Arribos: {len(arrivals)}")
-        logger.info(f"  Partidas: {len(departures)}")
-        logger.info(f"  Total: {len(arrivals) + len(departures)}")
+        logger.info(f"  Arribos (+6h): {len(arrivals_plus6)}")
+        logger.info(f"  Arribos (-1h): {len(arrivals_minus1)}")
+        logger.info(f"  Total Arribos: {len(all_arrivals)}")
+        logger.info(f"")
+        logger.info(f"  Partidas (+6h): {len(departures_plus6)}")
+        logger.info(f"  Partidas (-1h): {len(departures_minus1)}")
+        logger.info(f"  Total Partidas: {len(all_departures)}")
+        logger.info(f"")
+        logger.info(f"  TOTAL GENERAL: {len(all_arrivals) + len(all_departures)}")
         logger.info("="*70)
         
-        return arrivals, departures
+        return all_arrivals, all_departures
 
     def filtrar_vuelos_por_posiciones(self, vuelos: List[Dict], posiciones: List[str]) -> List[Dict]:
         posiciones = [p.zfill(2) for p in posiciones]
