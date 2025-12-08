@@ -6,18 +6,15 @@ import logging
 import json
 from typing import List, Dict, Tuple
 from fake_useragent import UserAgent
-from concurrent.futures import ThreadPoolExecutor
-import threading
 
 logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(levelname)s - %(message)s')
 logger = logging.getLogger(__name__)
 
-class TAMSScraperOptimized:
+class TAMSScraperFinal:
     def __init__(self):
         self.session = requests.Session()
         self.base_url = "http://www.tams.com.ar/organismos/vuelos.aspx"
         self.setup_session()
-        self._lock = threading.Lock()
 
     def setup_session(self):
         try:
@@ -30,12 +27,12 @@ class TAMSScraperOptimized:
             'User-Agent': user_agent,
             'Accept': 'text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8',
             'Accept-Language': 'es-ES,es;q=0.9',
-            'Accept-Encoding': 'gzip, deflate',  # Habilitar compresión
+            'Accept-Encoding': 'gzip, deflate',
             'Connection': 'keep-alive',
             'Cache-Control': 'no-cache',
         })
         
-        # Pool optimizado para múltiples requests simultáneos
+        # Pool optimizado para múltiples requests
         adapter = requests.adapters.HTTPAdapter(
             pool_connections=20,
             pool_maxsize=40,
@@ -61,31 +58,39 @@ class TAMSScraperOptimized:
         return viewstate
 
     def get_initial_page(self) -> Tuple[BeautifulSoup, Dict[str, str]]:
-        """Obtiene la página inicial y extrae ViewState - OPTIMIZADO"""
+        """Obtiene la página inicial - OPTIMIZADO"""
         logger.info("Obteniendo página inicial...")
-        response = self.session.get(self.base_url, timeout=5)  # Timeout reducido
+        response = self.session.get(self.base_url, timeout=5)
         response.raise_for_status()
         
-        # Usar lxml para parsing más rápido
-        soup = BeautifulSoup(response.text, 'lxml')
+        # Usar lxml para parsing más rápido (10x faster)
+        try:
+            soup = BeautifulSoup(response.text, 'lxml')
+        except:
+            # Fallback a html.parser si lxml no está disponible
+            soup = BeautifulSoup(response.text, 'html.parser')
+            
         viewstate = self.extract_viewstate_data(soup)
         
         return soup, viewstate
 
-    def make_post_request(self, data: Dict[str, str], use_lxml: bool = True) -> Tuple[BeautifulSoup, Dict[str, str]]:
+    def make_post_request(self, data: Dict[str, str]) -> Tuple[BeautifulSoup, Dict[str, str]]:
         """Método genérico para hacer POST - OPTIMIZADO"""
         response = self.session.post(self.base_url, data=data, timeout=5)
         response.raise_for_status()
         
-        # lxml es ~10x más rápido que html.parser
-        parser = 'lxml' if use_lxml else 'html.parser'
-        soup = BeautifulSoup(response.text, parser)
+        # Intentar lxml primero, fallback a html.parser
+        try:
+            soup = BeautifulSoup(response.text, 'lxml')
+        except:
+            soup = BeautifulSoup(response.text, 'html.parser')
+            
         viewstate = self.extract_viewstate_data(soup)
         
         return soup, viewstate
 
     def change_to_departures(self, viewstate: Dict[str, str]) -> Tuple[BeautifulSoup, Dict[str, str]]:
-        """Cambia a partidas - SIN SLEEPS innecesarios"""
+        """Cambia a partidas - SIN SLEEPS"""
         logger.info("Cambiando a PARTIDAS...")
         
         # Paso 1: Cambiar dropdown
@@ -103,7 +108,7 @@ class TAMSScraperOptimized:
         
         soup, viewstate = self.make_post_request(data)
         
-        # Paso 2: Buscar (sin sleep entre requests)
+        # Paso 2: Buscar
         data.update({
             '__EVENTTARGET': '',
             '__EVENTARGUMENT': '',
@@ -146,7 +151,8 @@ class TAMSScraperOptimized:
     def click_pagination(self, viewstate: Dict[str, str], page_target: str, 
                         flight_type: str) -> Tuple[BeautifulSoup, Dict[str, str]]:
         """Navega paginación - SIN SLEEPS"""
-        logger.info(f"→ Página: {page_target.split('$')[-1]}")
+        page_num = page_target.split('$')[-1]
+        logger.info(f"→ Página: {page_num}")
         
         mov_type = 'A' if flight_type == 'Arribos' else 'D'
         
@@ -165,7 +171,7 @@ class TAMSScraperOptimized:
         return self.make_post_request(data)
 
     def parse_flights(self, soup: BeautifulSoup, flight_type: str) -> List[Dict]:
-        """Parsea vuelos - OPTIMIZADO con list comprehension"""
+        """Parsea vuelos - OPTIMIZADO"""
         table_id = 'dgGrillaA' if flight_type == 'Arribos' else 'dgGrillaD'
         table = soup.find('table', {'id': table_id})
         
@@ -176,10 +182,10 @@ class TAMSScraperOptimized:
         if len(rows) < 2:
             return []
         
-        # Extraer headers una vez
+        # Extraer headers
         headers = [cell.get_text(strip=True) for cell in rows[0].find_all(['th', 'td'])]
         
-        # Parseo optimizado con list comprehension
+        # Parseo optimizado
         flights = []
         for row in rows[1:]:
             cells = row.find_all('td')
@@ -189,10 +195,10 @@ class TAMSScraperOptimized:
                 continue
             
             if len(cells) >= len(headers):
-                flight = {
-                    'Tipo': flight_type,
-                    **{headers[idx]: cell.get_text(strip=True) for idx, cell in enumerate(cells) if idx < len(headers)}
-                }
+                flight = {'Tipo': flight_type}
+                for idx, cell in enumerate(cells):
+                    if idx < len(headers):
+                        flight[headers[idx]] = cell.get_text(strip=True)
                 flights.append(flight)
         
         return flights
@@ -207,7 +213,7 @@ class TAMSScraperOptimized:
         if not pager_row:
             return []
         
-        # Extraer todos con regex de una sola pasada
+        # Extraer todos con regex
         links = []
         for a in pager_row.find_all('a', href=True):
             match = re.search(r"__doPostBack\('([^']+)'", a['href'])
@@ -216,20 +222,9 @@ class TAMSScraperOptimized:
         
         return links
 
-    def scrape_page_parallel(self, args: Tuple) -> List[Dict]:
-        """Scrapea una página individual - Para uso paralelo"""
-        viewstate, page_link, flight_type = args
-        try:
-            soup, new_viewstate = self.click_pagination(viewstate, page_link, flight_type)
-            flights = self.parse_flights(soup, flight_type)
-            return flights, new_viewstate
-        except Exception as e:
-            logger.error(f"Error en página paralela: {e}")
-            return [], viewstate
-
     def scrape_all_pages(self, soup: BeautifulSoup, viewstate: Dict[str, str], 
                         flight_type: str, max_pages: int = 3) -> List[Dict]:
-        """Scrapea todas las páginas - MODO SECUENCIAL OPTIMIZADO"""
+        """Scrapea todas las páginas - OPTIMIZADO"""
         all_flights = []
         table_id = 'dgGrillaA' if flight_type == 'Arribos' else 'dgGrillaD'
         
@@ -242,16 +237,22 @@ class TAMSScraperOptimized:
         all_flights.extend(page1_flights)
         
         if page1_flights:
-            logger.info(f"Pág 1: {len(page1_flights)} vuelos | {page1_flights[0].get('Vuelo')} → {page1_flights[-1].get('Vuelo')}")
+            first = page1_flights[0].get('Vuelo', '?')
+            last = page1_flights[-1].get('Vuelo', '?')
+            logger.info(f"Pág 1: {len(page1_flights)} vuelos | {first} → {last}")
+        else:
+            logger.info("Pág 1: Sin vuelos")
         
         # Obtener enlaces
         page_links = self.get_page_links(soup, table_id)
         
         if not page_links:
-            logger.info("→ Una sola página")
+            logger.info("→ Una sola página disponible")
             return all_flights
         
-        # Scrapear páginas adicionales SECUENCIALMENTE (ViewState depende de la anterior)
+        logger.info(f"→ Total páginas disponibles: {len(page_links) + 1}")
+        
+        # Scrapear páginas adicionales
         pages_to_scrape = min(len(page_links), max_pages - 1)
         
         for idx, page_link in enumerate(page_links[:pages_to_scrape]):
@@ -265,24 +266,27 @@ class TAMSScraperOptimized:
                     # Check duplicados
                     first_new = page_flights[0].get('Vuelo')
                     if any(f.get('Vuelo') == first_new for f in all_flights):
-                        logger.warning(f"⚠ Duplicado: {first_new} - STOP")
+                        logger.warning(f"⚠ Duplicado detectado: {first_new} - Deteniendo paginación")
                         break
                     
                     all_flights.extend(page_flights)
-                    logger.info(f"Pág {page_num}: {len(page_flights)} vuelos | {page_flights[0].get('Vuelo')} → {page_flights[-1].get('Vuelo')}")
+                    first = page_flights[0].get('Vuelo', '?')
+                    last = page_flights[-1].get('Vuelo', '?')
+                    logger.info(f"Pág {page_num}: {len(page_flights)} vuelos | {first} → {last}")
                 else:
-                    logger.warning(f"Pág {page_num}: Vacía")
+                    logger.warning(f"Pág {page_num}: Sin vuelos")
                     
             except Exception as e:
-                logger.error(f"Error pág {page_num}: {e}")
+                logger.error(f"Error en página {page_num}: {e}")
                 break
         
-        logger.info(f"TOTAL {flight_type.upper()}: {len(all_flights)} vuelos\n")
+        logger.info(f"TOTAL {flight_type.upper()}: {len(all_flights)} vuelos")
+        logger.info(f"{'='*70}\n")
         
         return all_flights
 
     def scrape_all_flights(self) -> Tuple[List[Dict], List[Dict]]:
-        """Scrapea todo - FLUJO OPTIMIZADO"""
+        """Scrapea todo - OPTIMIZADO"""
         start_time = time.time()
         
         # Página inicial (Arribos +6h)
@@ -295,25 +299,25 @@ class TAMSScraperOptimized:
         
         # Arribos -1h (solo pág 1)
         logger.info("\n" + "="*70)
-        logger.info("VENTANA -1 HORA")
-        logger.info("="*70)
+        logger.info("CAMBIANDO A VENTANA HORARIA: -1 HORA")
+        logger.info("="*70 + "\n")
         
         soup, viewstate = self.change_time_window_and_search(viewstate, 'A', '-1')
         arrivals_minus1 = self.parse_flights(soup, 'Arribos')
-        logger.info(f"Arribos -1h: {len(arrivals_minus1)} vuelos")
+        logger.info(f"Arribos -1h: {len(arrivals_minus1)} vuelos\n")
         
         # Partidas -1h (solo pág 1)
         soup, viewstate = self.change_time_window_and_search(viewstate, 'D', '-1')
         departures_minus1 = self.parse_flights(soup, 'Partidas')
-        logger.info(f"Partidas -1h: {len(departures_minus1)} vuelos")
+        logger.info(f"Partidas -1h: {len(departures_minus1)} vuelos\n")
         
-        # Combinar
+        # Combinar resultados
         all_arrivals = arrivals_plus6 + arrivals_minus1
         all_departures = departures_plus6 + departures_minus1
         
         elapsed = time.time() - start_time
         
-        logger.info("\n" + "="*70)
+        logger.info("="*70)
         logger.info(f"RESUMEN FINAL - Tiempo: {elapsed:.2f}s")
         logger.info(f"  Arribos: {len(all_arrivals)} ({len(arrivals_plus6)} +6h, {len(arrivals_minus1)} -1h)")
         logger.info(f"  Partidas: {len(all_departures)} ({len(departures_plus6)} +6h, {len(departures_minus1)} -1h)")
@@ -333,37 +337,8 @@ class TAMSScraperOptimized:
         return self.filtrar_vuelos_por_posiciones(arr, posiciones) + self.filtrar_vuelos_por_posiciones(dep, posiciones)
 
 
-# =====================================================
-# VERSIÓN ULTRA RÁPIDA CON ASYNCIO (OPCIONAL)
-# =====================================================
-"""
-Si querés aún MÁS velocidad, instalá: pip install aiohttp lxml
-
-import asyncio
-import aiohttp
-from typing import List, Dict, Tuple
-
-class TAMSScraperAsync:
-    def __init__(self):
-        self.base_url = "http://www.tams.com.ar/organismos/vuelos.aspx"
-        
-    async def fetch(self, session: aiohttp.ClientSession, data: Dict = None) -> str:
-        if data:
-            async with session.post(self.base_url, data=data, timeout=5) as response:
-                return await response.text()
-        else:
-            async with session.get(self.base_url, timeout=5) as response:
-                return await response.text()
-    
-    async def scrape_all_flights_async(self) -> Tuple[List[Dict], List[Dict]]:
-        # Implementar versión async completa
-        # Hasta 10x más rápido con requests paralelos
-        pass
-"""
-
-
 if __name__ == "__main__":
-    scraper = TAMSScraperOptimized()
+    scraper = TAMSScraperFinal()
     import sys
     
     if len(sys.argv) > 1 and sys.argv[1] == 'n8n':
