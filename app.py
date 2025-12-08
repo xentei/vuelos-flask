@@ -1,4 +1,4 @@
-from flask import Flask, jsonify, request
+from flask import Flask, jsonify
 from flask_cors import CORS
 from scraper import TAMSScraperFinal
 import logging
@@ -19,12 +19,95 @@ logging.basicConfig(
 )
 logger = logging.getLogger(__name__)
 
+
 # =====================================================
-# SISTEMA DE CACHÉ THREAD-SAFE
+# NORMALIZACIÓN DE DATOS
+# =====================================================
+def limpiar_campo(obj: Dict, claves_posibles: list) -> str:
+    """Busca un campo en múltiples variantes de encoding"""
+    for clave in claves_posibles:
+        if clave in obj and obj[clave]:
+            return str(obj[clave]).strip()
+    return "---"
+
+
+def limpiar_hora(raw: str) -> str:
+    """Extrae solo HH:MM de strings como '08/12 19:30'"""
+    if not raw:
+        return ""
+    if " " in raw:
+        return raw.split(" ")[1]
+    return raw
+
+
+def normalizar_vuelo(vuelo: Dict, tipo: str) -> Dict:
+    """
+    Transforma el formato crudo de TAMS al formato limpio esperado por el frontend.
+    Maneja todos los encodings posibles de caracteres especiales.
+    """
+    
+    # Extraer CÍA con múltiples variantes de encoding
+    cia = limpiar_campo(vuelo, [
+        "Cia.",           # Normal
+        "CÃa.",           # Latin-1 mal interpretado
+        "C\u00c3\u00ada.",  # UTF-8 doble encoding
+        "Cía.",           # Con tilde correcta
+        "Cia"             # Sin punto
+    ])
+    
+    # Número de vuelo
+    num = vuelo.get("Vuelo", "")
+    vuelo_full = f"{cia} {num}".strip()
+    
+    # Matrícula con variantes
+    matricula = limpiar_campo(vuelo, [
+        "Matricula",
+        "MatrÃcula",
+        "Matr\u00c3\u00adcula",
+        "Matrícula"
+    ])
+    
+    # Posición con variantes
+    posicion = limpiar_campo(vuelo, [
+        "Posicion",
+        "PosiciÃ³n",
+        "Posici\u00c3\u00b3n",
+        "Posición"
+    ])
+    
+    # Campos específicos por tipo
+    if tipo == "dep":
+        lugar = vuelo.get("Destino", "---")
+        dato_extra = vuelo.get("Puerta", "---")
+        prog = limpiar_hora(vuelo.get("STD", ""))
+        est = limpiar_hora(vuelo.get("ETD", ""))
+        real = limpiar_hora(vuelo.get("ATD", ""))
+    else:  # arribos
+        lugar = vuelo.get("Origen", "---")
+        dato_extra = vuelo.get("Cinta", "---")
+        prog = limpiar_hora(vuelo.get("STA", ""))
+        est = limpiar_hora(vuelo.get("ETA", ""))
+        real = limpiar_hora(vuelo.get("ATA", ""))
+    
+    estado = vuelo.get("Remark", "")
+    
+    return {
+        "vuelo": vuelo_full,
+        "lugar": lugar,
+        "hora_prog": prog,
+        "hora_est": est,
+        "hora_real": real,
+        "matricula": matricula,
+        "posicion": posicion,
+        "dato_extra": dato_extra,
+        "estado": estado
+    }
+
+
+# =====================================================
+# SISTEMA DE CACHÉ
 # =====================================================
 class FlightDataCache:
-    """Caché inteligente con threading y TTL"""
-    
     def __init__(self, ttl_seconds: int = 120):
         self.data: Optional[Dict[str, Any]] = None
         self.timestamp: Optional[datetime] = None
@@ -37,21 +120,17 @@ class FlightDataCache:
         self.miss_count = 0
         
     def is_expired(self) -> bool:
-        """Verifica si el caché expiró"""
         if self.timestamp is None:
             return True
         age = (datetime.now() - self.timestamp).total_seconds()
         return age >= self.ttl
     
     def get_age(self) -> Optional[float]:
-        """Retorna edad del caché en segundos"""
         if self.timestamp is None:
             return None
         return (datetime.now() - self.timestamp).total_seconds()
     
     def get_or_refresh(self) -> Dict[str, Any]:
-        """Obtiene datos del caché o scrapea si es necesario"""
-        
         # Fast path: caché válido
         if self.data is not None and not self.is_expired():
             with self.lock:
@@ -61,49 +140,46 @@ class FlightDataCache:
         
         # Slow path: necesita scraping
         with self.lock:
-            # Double-check: otro thread pudo haber actualizado mientras esperábamos
+            # Double-check
             if self.data is not None and not self.is_expired():
                 self.hit_count += 1
-                logger.info(f"✅ CACHÉ HIT (double-check) - Edad: {self.get_age():.1f}s")
                 return self.data
             
-            # Si otro thread está scrapeando, esperar un poco
             if self.scraping_in_progress:
-                logger.info("⏳ Scraping en progreso, esperando...")
-                # Release lock temporalmente
+                logger.info("⏳ Scraping en progreso...")
                 self.lock.release()
                 time.sleep(2)
                 self.lock.acquire()
                 
-                # Verificar si el otro thread terminó
                 if self.data is not None and not self.is_expired():
                     self.hit_count += 1
-                    logger.info("✅ CACHÉ actualizado por otro thread")
                     return self.data
             
-            # Marcar que estamos scrapeando
             self.scraping_in_progress = True
             self.miss_count += 1
         
-        # Scrapear (fuera del lock para no bloquear otros threads)
+        # Scrapear
         try:
-            logger.info("🔄 CACHÉ MISS - Iniciando scraping...")
+            logger.info("🔄 CACHÉ MISS - Scrapeando...")
             start_time = time.time()
             
             scraper = TAMSScraperFinal()
-            arribos, partidas = scraper.scrape_all_flights()
+            arribos_raw, partidas_raw = scraper.scrape_all_flights()
+            
+            # ⚡ NORMALIZAR DATOS AQUÍ
+            arribos_limpios = [normalizar_vuelo(v, "arr") for v in arribos_raw]
+            partidas_limpias = [normalizar_vuelo(v, "dep") for v in partidas_raw]
             
             elapsed = time.time() - start_time
             
             new_data = {
-                'arribos': arribos,
-                'partidas': partidas,
+                'arribos': arribos_limpios,
+                'partidas': partidas_limpias,
                 'timestamp': datetime.now().isoformat(),
                 'scrape_time': round(elapsed, 2),
-                'total_flights': len(arribos) + len(partidas)
+                'total_flights': len(arribos_limpios) + len(partidas_limpias)
             }
             
-            # Actualizar caché
             with self.lock:
                 self.data = new_data
                 self.timestamp = datetime.now()
@@ -111,32 +187,34 @@ class FlightDataCache:
                 self.scrape_count += 1
                 self.scraping_in_progress = False
             
-            logger.info(f"✅ Scraping exitoso - {new_data['total_flights']} vuelos en {elapsed:.2f}s")
+            logger.info(f"✅ Scraping OK - {new_data['total_flights']} vuelos en {elapsed:.2f}s")
+            logger.info(f"   Partidas: {len(partidas_limpias)} | Arribos: {len(arribos_limpios)}")
+            
+            # DEBUG: Ver primer vuelo
+            if partidas_limpias:
+                logger.info(f"   Primera partida: {partidas_limpias[0]['vuelo']}")
+            
             return new_data
             
         except Exception as e:
-            logger.error(f"❌ Error en scraping: {e}")
+            logger.error(f"❌ Error scraping: {e}")
             
             with self.lock:
                 self.last_error = str(e)
                 self.scraping_in_progress = False
                 
-                # Si hay caché viejo, retornarlo como fallback
                 if self.data is not None:
-                    logger.warning("⚠️ Retornando caché expirado como fallback")
+                    logger.warning("⚠️ Usando caché expirado")
                     stale_data = self.data.copy()
                     stale_data['warning'] = 'Datos desactualizados'
-                    stale_data['age_seconds'] = self.get_age()
                     return stale_data
             
-            # No hay caché, propagar error
             raise
     
     def get_stats(self) -> Dict[str, Any]:
-        """Estadísticas del caché"""
         with self.lock:
-            total_requests = self.hit_count + self.miss_count
-            hit_rate = (self.hit_count / total_requests * 100) if total_requests > 0 else 0
+            total = self.hit_count + self.miss_count
+            hit_rate = (self.hit_count / total * 100) if total > 0 else 0
             
             return {
                 'hits': self.hit_count,
@@ -147,19 +225,15 @@ class FlightDataCache:
                 'ttl': self.ttl,
                 'is_expired': self.is_expired(),
                 'has_data': self.data is not None,
-                'last_error': self.last_error,
-                'scraping_in_progress': self.scraping_in_progress
+                'last_error': self.last_error
             }
     
     def clear(self):
-        """Limpia el caché"""
         with self.lock:
             self.data = None
             self.timestamp = None
-            logger.info("🗑️ Caché limpiado manualmente")
 
 
-# Instancia global del caché (TTL: 2 minutos)
 flight_cache = FlightDataCache(ttl_seconds=120)
 
 
@@ -169,7 +243,6 @@ flight_cache = FlightDataCache(ttl_seconds=120)
 
 @app.route('/datos-limpios', methods=['GET'])
 def datos_limpios():
-    """Endpoint principal - Retorna datos de vuelos (con caché)"""
     try:
         data = flight_cache.get_or_refresh()
         return jsonify(data), 200
@@ -177,16 +250,14 @@ def datos_limpios():
         logger.exception("Error obteniendo datos")
         return jsonify({
             'error': str(e),
-            'message': 'Error al obtener datos de vuelos',
-            'timestamp': datetime.now().isoformat()
+            'partidas': [],
+            'arribos': []
         }), 500
 
 
 @app.route('/health', methods=['GET'])
 def health():
-    """Health check endpoint"""
     stats = flight_cache.get_stats()
-    
     status = 'healthy' if stats['has_data'] and not stats['is_expired'] else 'degraded'
     
     return jsonify({
@@ -198,81 +269,41 @@ def health():
 
 @app.route('/stats', methods=['GET'])
 def stats():
-    """Estadísticas del caché"""
     return jsonify(flight_cache.get_stats()), 200
 
 
 @app.route('/cache/clear', methods=['POST'])
 def clear_cache():
-    """Limpia el caché manualmente (útil para debugging)"""
     flight_cache.clear()
-    return jsonify({
-        'message': 'Caché limpiado',
-        'timestamp': datetime.now().isoformat()
-    }), 200
+    return jsonify({'message': 'Caché limpiado'}), 200
 
 
 @app.route('/cache/refresh', methods=['POST'])
 def refresh_cache():
-    """Fuerza un refresh del caché"""
     try:
-        # Marcar como expirado para forzar refresh
         with flight_cache.lock:
             flight_cache.timestamp = datetime.now() - timedelta(seconds=flight_cache.ttl + 1)
         
         data = flight_cache.get_or_refresh()
-        
-        return jsonify({
-            'message': 'Caché actualizado',
-            'data': data
-        }), 200
+        return jsonify({'message': 'Caché actualizado', 'flights': data['total_flights']}), 200
     except Exception as e:
         return jsonify({'error': str(e)}), 500
 
 
 @app.route('/', methods=['GET'])
 def index():
-    """Página de bienvenida con info de endpoints"""
     return jsonify({
         'service': 'AEP Flight Data API',
-        'version': '2.0',
+        'version': '2.1 - Con normalización',
         'endpoints': {
-            'GET /datos-limpios': 'Obtener datos de vuelos (con caché)',
-            'GET /health': 'Health check y estado del caché',
-            'GET /stats': 'Estadísticas del caché',
-            'POST /cache/clear': 'Limpiar caché manualmente',
-            'POST /cache/refresh': 'Forzar actualización del caché'
-        },
-        'cache_ttl': f"{flight_cache.ttl} segundos"
+            'GET /datos-limpios': 'Datos normalizados',
+            'GET /health': 'Estado del sistema',
+            'GET /stats': 'Estadísticas',
+            'POST /cache/refresh': 'Forzar actualización'
+        }
     }), 200
 
 
-# =====================================================
-# ERROR HANDLERS
-# =====================================================
-
-@app.errorhandler(404)
-def not_found(error):
-    return jsonify({'error': 'Endpoint no encontrado'}), 404
-
-
-@app.errorhandler(500)
-def internal_error(error):
-    logger.exception("Error 500")
-    return jsonify({'error': 'Error interno del servidor'}), 500
-
-
-# =====================================================
-# STARTUP
-# =====================================================
-
-@app.before_request
-def log_request():
-    """Log de cada request"""
-    logger.info(f"→ {request.method} {request.path} from {request.remote_addr}")
-
-
 if __name__ == "__main__":
-    logger.info("🚀 Iniciando servidor Flask...")
-    logger.info(f"📦 Caché TTL: {flight_cache.ttl} segundos")
+    logger.info("🚀 Iniciando servidor con normalización...")
     app.run(debug=False, host="0.0.0.0", port=5000)
